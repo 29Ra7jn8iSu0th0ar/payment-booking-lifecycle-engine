@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Seat Inventory Dashboard</title>
+    <style>
+      :root {
+        --bg: #0b1a2b;
+        --panel: #102541;
+        --panel-alt: #122b4d;
+        --text: #e9f1ff;
+        --muted: #9fb4d6;
+        --accent: #35c1ff;
+        --good: #28d17c;
+        --warn: #ffc857;
+      }
+
+      * { box-sizing: border-box; }
+
+      body {
+        margin: 0;
+        font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+        background: radial-gradient(circle at top, #112a4a, #0b1a2b 55%);
+        color: var(--text);
+      }
+
+      header {
+        padding: 32px 20px 20px;
+        text-align: center;
+      }
+
+      h1 {
+        margin: 0 0 6px;
+        font-size: 28px;
+        letter-spacing: 0.5px;
+      }
+
+      p.lead {
+        margin: 0;
+        color: var(--muted);
+      }
+
+      main {
+        max-width: 980px;
+        margin: 0 auto 40px;
+        padding: 0 20px 40px;
+      }
+
+      .card {
+        background: var(--panel);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 14px;
+        padding: 18px;
+        margin-top: 20px;
+        box-shadow: 0 10px 22px rgba(0, 0, 0, 0.2);
+      }
+
+      .section-title {
+        margin: 0 0 10px;
+        font-size: 18px;
+      }
+
+      .grid {
+        display: grid;
+        gap: 16px;
+        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      }
+
+      .item {
+        background: var(--panel-alt);
+        border-radius: 12px;
+        padding: 14px;
+        cursor: pointer;
+        transition: transform 0.15s ease, box-shadow 0.15s ease;
+      }
+      .item:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 10px 18px rgba(0, 0, 0, 0.25);
+      }
+
+      .item h4 {
+        margin: 0 0 6px;
+        font-size: 16px;
+      }
+
+      .item small {
+        color: var(--muted);
+      }
+
+      .item a {
+        color: var(--text);
+        text-decoration: none;
+      }
+
+      .item a:hover {
+        color: var(--accent);
+      }
+      .event-actions {
+        margin-top: 10px;
+      }
+      .event-button {
+        display: inline-block;
+        padding: 6px 12px;
+        border-radius: 999px;
+        background: var(--accent);
+        color: #061629;
+        font-weight: 600;
+        font-size: 13px;
+        text-decoration: none;
+      }
+      .event-button:hover {
+        filter: brightness(1.05);
+      }
+
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 16px;
+        font-size: 14px;
+      }
+
+      th, td {
+        padding: 10px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        text-align: left;
+      }
+
+      th {
+        color: var(--muted);
+        font-weight: 600;
+      }
+      .row-link {
+        cursor: pointer;
+      }
+      .row-link:hover {
+        background: rgba(53, 193, 255, 0.08);
+      }
+      .event-link {
+        color: var(--text);
+        text-decoration: none;
+      }
+      .event-link:hover {
+        color: var(--accent);
+      }
+
+      .badge {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 999px;
+        font-size: 12px;
+        font-weight: 600;
+      }
+
+      .badge-good { background: rgba(40, 209, 124, 0.2); color: var(--good); }
+      .badge-warn { background: rgba(255, 200, 87, 0.2); color: var(--warn); }
+      .empty {
+        color: var(--muted);
+        text-align: center;
+        padding: 30px 10px;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Seat Inventory Dashboard</h1>
+      <p class="lead">Live availability for configured events</p>
+    </header>
+
+    <main>
+      <section class="card">
+        <h2 class="section-title">All Listings (Events + Restaurants)</h2>
+        {% if (events and events|length > 0) or (table_slots and table_slots|length > 0) %}
+          <table>
+            <thead>
+              <tr>
+                <th>Type</th>
+                <th>Title</th>
+                <th>Date & Time</th>
+                <th>Details</th>
+                <th>Seats / Price</th>
+                <th>Status</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for event in events %}
+                {% set total = 0 %}
+                {% set available = 0 %}
+                {% for seat in event.seat_types %}
+                  {% set total = total + seat.total_seats %}
+                  {% set available = available + seat.available_seats %}
+                {% endfor %}
+                {% set ratio = (available / total) if total else 0 %}
+                <tr class="row-link" onclick="window.location.href='/events/{{ event.id }}/page'">
+                  <td>Event</td>
+                  <td>
+                    <a class="event-link" href="/events/{{ event.id }}/page">{{ event.title }}</a>
+                  </td>
+                  <td>{{ event.date_time }}</td>
+                  <td>{{ event.type }} ??? {{ event.location }}</td>
+                  <td>
+                    {% for seat in event.seat_types %}
+                      <div><strong>{{ seat.seat_type }}</strong>: {{ seat.available_seats }}/{{ seat.total_seats }} ??? {{ seat.price }}</div>
+                    {% endfor %}
+                  </td>
+                  <td>
+                    {% if ratio <= 0.2 %}
+                      <span class="badge badge-warn">Low</span>
+                    {% else %}
+                      <span class="badge badge-good">Healthy</span>
+                    {% endif %}
+                  </td>
+                  <td><a class="event-button" href="/events/{{ event.id }}/page">View & Pay</a></td>
+                </tr>
+              {% endfor %}
+              {% for slot in table_slots %}
+                <tr class="row-link" onclick="window.location.href='/restaurants/tables/{{ slot.id }}/page'">
+                  <td>Restaurant</td>
+                  <td>
+                    <a class="event-link" href="/restaurants/tables/{{ slot.id }}/page">{{ slot.restaurant_name }}</a>
+                  </td>
+                  <td>{{ slot.date_time }}</td>
+                  <td>Table {{ slot.table_number }} ??? Capacity {{ slot.capacity }}</td>
+                  <td>Price: {{ slot.price_per_table }}</td>
+                  <td>
+                    {% if slot.status == "AVAILABLE" %}
+                      <span class="badge badge-good">Available</span>
+                    {% else %}
+                      <span class="badge badge-warn">{{ slot.status }}</span>
+                    {% endif %}
+                  </td>
+                  <td><a class="event-button" href="/restaurants/tables/{{ slot.id }}/page">View & Pay</a></td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        {% else %}
+          <div class="empty">
+            No events or table slots available yet.
+          </div>
+        {% endif %}
+      </section>
+    </main>
+  </body>
+</html>

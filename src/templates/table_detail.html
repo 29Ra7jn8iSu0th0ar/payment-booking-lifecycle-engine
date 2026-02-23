@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Table Slot - Details</title>
+    <style>
+      :root {
+        --bg: #0b1a2b;
+        --panel: #102541;
+        --panel-alt: #122b4d;
+        --text: #e9f1ff;
+        --muted: #9fb4d6;
+        --accent: #35c1ff;
+        --good: #28d17c;
+        --warn: #ffc857;
+      }
+
+      * { box-sizing: border-box; }
+
+      body {
+        margin: 0;
+        font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+        background: radial-gradient(circle at top, #112a4a, #0b1a2b 55%);
+        color: var(--text);
+      }
+
+      header {
+        padding: 32px 20px 10px;
+        text-align: center;
+      }
+
+      a {
+        color: var(--accent);
+        text-decoration: none;
+      }
+
+      main {
+        max-width: 820px;
+        margin: 0 auto 40px;
+        padding: 0 20px 40px;
+      }
+
+      .card {
+        background: var(--panel);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 14px;
+        padding: 18px;
+        margin-top: 20px;
+        box-shadow: 0 10px 22px rgba(0, 0, 0, 0.2);
+      }
+
+      .badge {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 999px;
+        font-size: 12px;
+        font-weight: 600;
+      }
+
+      .badge-good { background: rgba(40, 209, 124, 0.2); color: var(--good); }
+      .badge-warn { background: rgba(255, 200, 87, 0.2); color: var(--warn); }
+    </style>
+    <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+  </head>
+  <body>
+    <header>
+      <h1>{{ slot.restaurant_name }}</h1>
+      <div>Table {{ slot.table_number }} • {{ slot.date_time }}</div>
+      <div>Capacity: {{ slot.capacity }}</div>
+      <div style="margin-top: 8px;"><a href="/">Back to Dashboard</a></div>
+    </header>
+
+    <main>
+      <section class="card">
+        <h2>Slot Details</h2>
+        <div>Price: {{ slot.price_per_table }}</div>
+        <div>Status: {{ slot.status }}</div>
+        <div style="margin-top: 8px;">
+          {% if slot.status == "AVAILABLE" %}
+            <span class="badge badge-good">Available</span>
+          {% else %}
+            <span class="badge badge-warn">Booked</span>
+          {% endif %}
+        </div>
+        {% if slot.status == "AVAILABLE" %}
+          <div style="margin-top: 12px;">
+            <button onclick="startTablePayment()">Pay Now</button>
+          </div>
+        {% endif %}
+      </section>
+    </main>
+    <script>
+      async function startTablePayment() {
+        const bookingResponse = await fetch(
+          "/restaurants/tables/{{ slot.id }}/book",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({})
+          }
+        );
+
+        if (!bookingResponse.ok) {
+          const errorText = await bookingResponse.text();
+          alert("Booking failed: " + errorText);
+          return;
+        }
+
+        const booking = await bookingResponse.json();
+        const options = {
+          key: booking.key_id,
+          amount: booking.amount,
+          currency: booking.currency,
+          name: "{{ slot.restaurant_name }}",
+          description: "Table {{ slot.table_number }}",
+          order_id: booking.order_id,
+          handler: async function (response) {
+            const verifyResponse = await fetch(
+              "/restaurants/bookings/" + booking.booking_id + "/verify",
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  razorpay_order_id: response.razorpay_order_id,
+                  razorpay_payment_id: response.razorpay_payment_id,
+                  razorpay_signature: response.razorpay_signature
+                })
+              }
+            );
+
+            if (verifyResponse.ok) {
+              alert("Payment successful! Table booked.");
+              window.location.reload();
+            } else {
+              const errorText = await verifyResponse.text();
+              alert("Payment verification failed: " + errorText);
+            }
+          },
+          theme: { color: "#35c1ff" }
+        };
+
+        const rzp = new Razorpay(options);
+        rzp.on("payment.failed", function (response) {
+          alert("Payment failed: " + response.error.description);
+        });
+        rzp.open();
+      }
+    </script>
+  </body>
+</html>

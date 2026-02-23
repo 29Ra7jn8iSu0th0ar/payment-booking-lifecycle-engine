@@ -1,0 +1,8 @@
+SQLAlchemy>=2.0
+psycopg2-binary
+pytest
+fastapi
+uvicorn
+pydantic
+jinja2
+razorpay

@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{ event.title }} - Details</title>
+    <style>
+      :root {
+        --bg: #0b1a2b;
+        --panel: #102541;
+        --panel-alt: #122b4d;
+        --text: #e9f1ff;
+        --muted: #9fb4d6;
+        --accent: #35c1ff;
+        --good: #28d17c;
+        --warn: #ffc857;
+      }
+
+      * { box-sizing: border-box; }
+
+      body {
+        margin: 0;
+        font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+        background: radial-gradient(circle at top, #112a4a, #0b1a2b 55%);
+        color: var(--text);
+      }
+
+      header {
+        padding: 32px 20px 10px;
+        text-align: center;
+      }
+
+      a {
+        color: var(--accent);
+        text-decoration: none;
+      }
+
+      main {
+        max-width: 820px;
+        margin: 0 auto 40px;
+        padding: 0 20px 40px;
+      }
+
+      .card {
+        background: var(--panel);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 14px;
+        padding: 18px;
+        margin-top: 20px;
+        box-shadow: 0 10px 22px rgba(0, 0, 0, 0.2);
+      }
+
+      .seat {
+        background: var(--panel-alt);
+        border-radius: 12px;
+        padding: 12px;
+        margin-top: 10px;
+      }
+
+      .badge {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 999px;
+        font-size: 12px;
+        font-weight: 600;
+      }
+
+      .badge-good { background: rgba(40, 209, 124, 0.2); color: var(--good); }
+      .badge-warn { background: rgba(255, 200, 87, 0.2); color: var(--warn); }
+    </style>
+    <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+  </head>
+  <body>
+    <header>
+      <h1>{{ event.title }}</h1>
+      <div>{{ event.type }} • {{ event.date_time }}</div>
+      <div>{{ event.location }}</div>
+      <div style="margin-top: 8px;"><a href="/">Back to Dashboard</a></div>
+    </header>
+
+    <main>
+      <div id="error-banner" style="display: none; margin: 16px 0; padding: 10px 14px; border-radius: 10px; background: rgba(255, 200, 87, 0.18); color: #ffc857; border: 1px solid rgba(255, 200, 87, 0.35);">
+        <strong>Notice:</strong> <span id="error-text"></span>
+      </div>
+      <section class="card">
+        <h2>Seat Types & Availability</h2>
+        {% if seat_types and seat_types|length > 0 %}
+          {% for seat in seat_types %}
+            {% set ratio = (seat.available_seats / seat.total_seats) if seat.total_seats else 0 %}
+            <div class="seat">
+              <strong>{{ seat.seat_type }}</strong>
+              <div>Price: {{ seat.price }}</div>
+              <div>Available: {{ seat.available_seats }} / {{ seat.total_seats }}</div>
+              <div>
+                {% if ratio <= 0.2 %}
+                  <span class="badge badge-warn">Low</span>
+                {% else %}
+                  <span class="badge badge-good">Healthy</span>
+                {% endif %}
+              </div>
+              <div style="margin-top: 10px;">
+                <label for="qty-{{ seat.id }}">Qty:</label>
+                <input
+                  id="qty-{{ seat.id }}"
+                  type="number"
+                  min="1"
+                  max="{{ seat.available_seats }}"
+                  value="1"
+                  style="width: 70px; margin-left: 6px;"
+                />
+                {% if seat.available_seats > 0 %}
+                  <button
+                    type="button"
+                    data-seat-id="{{ seat.id }}"
+                    data-seat-type="{{ seat.seat_type }}"
+                    data-max="{{ seat.available_seats }}"
+                    style="margin-left: 8px;"
+                    onclick="startEventPayment(this)"
+                  >
+                    Pay Now
+                  </button>
+                {% else %}
+                  <button
+                    type="button"
+                    data-seat-id="{{ seat.id }}"
+                    data-seat-type="{{ seat.seat_type }}"
+                    style="margin-left: 8px;"
+                    onclick="joinWaitlist(this)"
+                  >
+                    Join Waitlist
+                  </button>
+                {% endif %}
+              </div>
+            </div>
+          {% endfor %}
+        {% else %}
+          <div>No seat types configured for this event.</div>
+        {% endif %}
+      </section>
+    </main>
+    <script>
+      function showError(message) {
+        const banner = document.getElementById("error-banner");
+        const text = document.getElementById("error-text");
+        if (text) text.textContent = message || "Something went wrong.";
+        if (banner) banner.style.display = "block";
+      }
+
+      function clearError() {
+        const banner = document.getElementById("error-banner");
+        const text = document.getElementById("error-text");
+        if (text) text.textContent = "";
+        if (banner) banner.style.display = "none";
+      }
+
+      async function startEventPayment(button) {
+        clearError();
+        const seatId = button.dataset.seatId;
+        const seatType = button.dataset.seatType;
+        const max = Number(button.dataset.max || 0);
+        const qtyInput = document.getElementById("qty-" + seatId);
+        const seatCount = Number(qtyInput ? qtyInput.value : 1);
+
+        if (!seatCount || seatCount < 1) {
+          showError("Please enter a valid seat count.");
+          return;
+        }
+        if (max && seatCount > max) {
+          showError("Only " + max + " seats available.");
+          return;
+        }
+
+        const originalText = button.textContent;
+        button.disabled = true;
+        button.textContent = "Opening...";
+
+        let bookingResponse;
+        try {
+          console.log("[payment] creating booking", { eventId: "{{ event.id }}", seatType, seatCount });
+          bookingResponse = await fetch("/events/{{ event.id }}/book", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              seat_type: seatType,
+              seat_count: seatCount
+            })
+          });
+        } catch (err) {
+          console.error("[payment] booking request failed", err);
+          showError("Unable to reach server. Please try again.");
+          button.disabled = false;
+          button.textContent = originalText;
+          return;
+        }
+
+        if (!bookingResponse.ok) {
+          const errorText = await bookingResponse.text();
+          console.error("[payment] booking failed", bookingResponse.status, errorText);
+          showError("Booking failed: " + errorText);
+          button.disabled = false;
+          button.textContent = originalText;
+          return;
+        }
+
+        const booking = await bookingResponse.json();
+        console.log("[payment] booking created", booking);
+        const options = {
+          key: booking.key_id,
+          amount: booking.amount,
+          currency: booking.currency,
+          name: "{{ event.title }}",
+          description: seatType + " x " + seatCount,
+          order_id: booking.order_id,
+          handler: async function (response) {
+            const verifyResponse = await fetch(
+              "/events/bookings/" + booking.booking_id + "/verify",
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  razorpay_order_id: response.razorpay_order_id,
+                  razorpay_payment_id: response.razorpay_payment_id,
+                  razorpay_signature: response.razorpay_signature
+                })
+              }
+            );
+
+            if (verifyResponse.ok) {
+              console.log("[payment] verification success");
+              window.location.reload();
+            } else {
+              const errorText = await verifyResponse.text();
+              console.error("[payment] verification failed", errorText);
+              showError("Payment verification failed: " + errorText);
+            }
+          },
+          theme: { color: "#35c1ff" }
+        };
+
+        if (typeof Razorpay === "undefined") {
+          console.error("[payment] Razorpay SDK not loaded");
+          showError("Payment SDK not loaded. Disable adblock or try again.");
+          button.disabled = false;
+          button.textContent = originalText;
+          return;
+        }
+
+        const rzp = new Razorpay(options);
+        rzp.on("payment.failed", function (response) {
+          console.error("[payment] payment failed", response.error);
+          showError("Payment failed: " + response.error.description);
+        });
+        console.log("[payment] opening Razorpay");
+        rzp.open();
+        button.disabled = false;
+        button.textContent = originalText;
+      }
+
+      async function joinWaitlist(button) {
+        clearError();
+        const seatId = button.dataset.seatId;
+        const seatType = button.dataset.seatType;
+        const qtyInput = document.getElementById("qty-" + seatId);
+        const seatCount = Number(qtyInput ? qtyInput.value : 1);
+
+        if (!seatCount || seatCount < 1) {
+          showError("Please enter a valid seat count.");
+          return;
+        }
+
+        const originalText = button.textContent;
+        button.disabled = true;
+        button.textContent = "Joining...";
+
+        let response;
+        try {
+          console.log("[waitlist] joining", { eventId: "{{ event.id }}", seatType, seatCount });
+          response = await fetch("/events/{{ event.id }}/waitlist", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              seat_type: seatType,
+              seat_count: seatCount
+            })
+          });
+        } catch (err) {
+          console.error("[waitlist] join request failed", err);
+          showError("Unable to reach server. Please try again.");
+          button.disabled = false;
+          button.textContent = originalText;
+          return;
+        }
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          console.error("[waitlist] join failed", response.status, errorText);
+          showError("Waitlist failed: " + errorText);
+          button.disabled = false;
+          button.textContent = originalText;
+          return;
+        }
+
+        const data = await response.json();
+        console.log("[waitlist] joined", data);
+        window.location.href = "/events/waitlist/" + data.waitlist_id + "/page";
+      }
+    </script>
+  </body>
+</html>
