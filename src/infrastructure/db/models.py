@@ -5,6 +5,7 @@ from sqlalchemy import (
     Integer,
     DateTime,
     Enum,
+    Text,
     UniqueConstraint,
     CheckConstraint,
     ForeignKey,
@@ -199,6 +200,10 @@ class EventBooking(Base):
         nullable=False,
     )
 
+    __table_args__ = (
+        UniqueConstraint("payment_id", name="uq_event_booking_payment_id"),
+    )
+
 
 class EventWaitlistEntry(Base):
     __tablename__ = "event_waitlist"
@@ -301,4 +306,61 @@ class DiningTableBooking(Base):
         server_default=func.now(),
         onupdate=func.now(),
         nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint("payment_id", name="uq_dining_booking_payment_id"),
+    )
+
+
+class PaymentWebhookEvent(Base):
+    __tablename__ = "payment_webhook_events"
+
+    id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+    )
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    payment_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    booking_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    booking_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="PROCESSED")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint("provider", "payment_id", name="uq_webhook_provider_payment_id"),
+    )
+
+
+class OutboxEvent(Base):
+    __tablename__ = "outbox_events"
+
+    id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+    )
+    aggregate_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    aggregate_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload: Mapped[str] = mapped_column(Text, nullable=False)
+    dedupe_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="PENDING")
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("dedupe_key", name="uq_outbox_dedupe_key"),
     )

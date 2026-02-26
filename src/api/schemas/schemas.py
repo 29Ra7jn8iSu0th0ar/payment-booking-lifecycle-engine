@@ -116,3 +116,28 @@ class RazorpayVerifyRequest(BaseModel):
     razorpay_order_id: str
     razorpay_payment_id: str
     razorpay_signature: str
+
+
+class DeferredEventBookingResponse(BaseModel):
+    request_id: str
+    status: str
+    message: str
+
+
+class DeferredEventBookingStatusResponse(BaseModel):
+    request_id: str
+    event_id: str
+    seat_type: str
+    seat_count: int
+    status: str
+    queued_at: str
+
+
+class OutboxEventResponse(BaseModel):
+    id: str
+    aggregate_type: str
+    aggregate_id: str
+    event_type: str
+    status: str
+    attempts: int
+    created_at: str

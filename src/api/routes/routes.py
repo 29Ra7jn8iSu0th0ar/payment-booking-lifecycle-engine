@@ -1,11 +1,18 @@
-from datetime import datetime
+from collections import deque
+from datetime import datetime, timezone
+import hashlib
+import json
+import logging
 import os
+import threading
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError, OperationalError, TimeoutError as SQLAlchemyTimeoutError
 import razorpay
 
 from src.infrastructure.db.session import SessionLocal
@@ -27,6 +34,9 @@ from src.api.schemas.schemas import (
     EventWaitlistJoinRequest,
     EventWaitlistJoinResponse,
     EventWaitlistStatusResponse,
+    DeferredEventBookingResponse,
+    DeferredEventBookingStatusResponse,
+    OutboxEventResponse,
 )
 from src.domain.exceptions import (
     InsufficientInventoryError,
@@ -41,12 +51,19 @@ from src.infrastructure.db.models import (
     EventWaitlistEntry,
     DiningTableSlot,
     DiningTableBooking,
+    OutboxEvent,
+    PaymentWebhookEvent,
 )
 from src.infrastructure.repositories.seat_repository import SeatRepository
 
 
 router = APIRouter()
 templates = Jinja2Templates(directory="src/templates")
+logger = logging.getLogger(__name__)
+
+GRACEFUL_QUEUE_MAX_SIZE = int(os.getenv("GRACEFUL_QUEUE_MAX_SIZE", "500"))
+_deferred_event_booking_queue: deque[dict] = deque(maxlen=GRACEFUL_QUEUE_MAX_SIZE)
+_deferred_queue_lock = threading.Lock()
 
 
 def get_db():
@@ -59,6 +76,86 @@ def get_db():
         raise
     finally:
         db.close()
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _is_db_degraded(exc: Exception) -> bool:
+    return isinstance(exc, (OperationalError, SQLAlchemyTimeoutError))
+
+
+def _hash_webhook_payload(request: RazorpayVerifyRequest) -> str:
+    payload = {
+        "razorpay_order_id": request.razorpay_order_id,
+        "razorpay_payment_id": request.razorpay_payment_id,
+        "razorpay_signature": request.razorpay_signature,
+    }
+    encoded = json.dumps(payload, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _add_outbox_event(
+    db: Session,
+    aggregate_type: str,
+    aggregate_id: str,
+    event_type: str,
+    payload: dict,
+    dedupe_key: str,
+) -> None:
+    existing = db.execute(
+        select(OutboxEvent).where(OutboxEvent.dedupe_key == dedupe_key)
+    ).scalar_one_or_none()
+    if existing:
+        return
+
+    db.add(
+        OutboxEvent(
+            aggregate_type=aggregate_type,
+            aggregate_id=aggregate_id,
+            event_type=event_type,
+            payload=json.dumps(payload, sort_keys=True),
+            dedupe_key=dedupe_key,
+            status="PENDING",
+            attempts=0,
+        )
+    )
+
+
+def _enqueue_deferred_event_booking(event_id: str, request: EventBookingRequest) -> str:
+    request_id = str(uuid4())
+    item = {
+        "request_id": request_id,
+        "event_id": event_id,
+        "seat_type": request.seat_type,
+        "seat_count": request.seat_count,
+        "status": "QUEUED",
+        "queued_at": _utc_now_iso(),
+    }
+    with _deferred_queue_lock:
+        if len(_deferred_event_booking_queue) >= GRACEFUL_QUEUE_MAX_SIZE:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Degraded queue is full. Please retry after some time.",
+            )
+        _deferred_event_booking_queue.append(item)
+    return request_id
+
+
+def _get_deferred_event_booking(request_id: str) -> dict | None:
+    with _deferred_queue_lock:
+        for item in _deferred_event_booking_queue:
+            if item["request_id"] == request_id:
+                return dict(item)
+    return None
+
+
+def _remove_deferred_event_booking(request_id: str) -> None:
+    with _deferred_queue_lock:
+        remaining = [item for item in _deferred_event_booking_queue if item["request_id"] != request_id]
+        _deferred_event_booking_queue.clear()
+        _deferred_event_booking_queue.extend(remaining)
 
 
 def _razorpay_client() -> razorpay.Client:
@@ -156,6 +253,62 @@ def _process_waitlist(db: Session, event_id: str, seat_type_name: str) -> None:
         booking.order_id = order.get("id")
         entry.status = "READY"
         entry.booking_id = booking.id
+
+
+def _create_event_booking_order(
+    db: Session,
+    event_id: str,
+    request: EventBookingRequest,
+) -> EventBookingResponse:
+    seat_stmt = (
+        select(EventSeatType)
+        .where(EventSeatType.event_id == event_id)
+        .where(EventSeatType.seat_type == request.seat_type)
+        .with_for_update()
+    )
+    seat_type = db.execute(seat_stmt).scalar_one_or_none()
+    if not seat_type:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Seat type not found",
+        )
+    if seat_type.available_seats < request.seat_count:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Insufficient seats available",
+        )
+
+    amount_paise = seat_type.price * request.seat_count * 100
+    seat_type.available_seats -= request.seat_count
+    booking = EventBooking(
+        event_id=event_id,
+        seat_type=request.seat_type,
+        seat_count=request.seat_count,
+        status="PENDING",
+        amount_paise=amount_paise,
+        currency="INR",
+    )
+    db.add(booking)
+    db.flush()
+
+    client = _razorpay_client()
+    order = client.order.create(
+        {
+            "amount": amount_paise,
+            "currency": "INR",
+            "receipt": booking.id,
+        }
+    )
+    booking.order_id = order.get("id")
+
+    return EventBookingResponse(
+        booking_id=booking.id,
+        status=booking.status,
+        order_id=booking.order_id,
+        amount=amount_paise,
+        currency="INR",
+        key_id=_razorpay_key_id(),
+    )
 
 
 @router.get("/", response_class=HTMLResponse)
@@ -264,6 +417,60 @@ def table_detail_page(
 @router.get("/health")
 def health():
     return {"message": "District Integrity Engine is running"}
+
+
+@router.get("/outbox/events", response_model=list[OutboxEventResponse])
+def list_outbox_events(
+    status_filter: str = "PENDING",
+    limit: int = 50,
+    db: Session = Depends(get_db),
+):
+    safe_limit = max(1, min(limit, 200))
+    stmt = (
+        select(OutboxEvent)
+        .where(OutboxEvent.status == status_filter)
+        .order_by(OutboxEvent.created_at)
+        .limit(safe_limit)
+    )
+    events = list(db.execute(stmt).scalars().all())
+    return [
+        OutboxEventResponse(
+            id=item.id,
+            aggregate_type=item.aggregate_type,
+            aggregate_id=item.aggregate_id,
+            event_type=item.event_type,
+            status=item.status,
+            attempts=item.attempts,
+            created_at=item.created_at.isoformat(),
+        )
+        for item in events
+    ]
+
+
+@router.post("/outbox/events/{event_id}/mark-published", response_model=OutboxEventResponse)
+def mark_outbox_event_published(
+    event_id: str,
+    db: Session = Depends(get_db),
+):
+    item = db.execute(select(OutboxEvent).where(OutboxEvent.id == event_id)).scalar_one_or_none()
+    if not item:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Outbox event not found",
+        )
+
+    item.status = "PUBLISHED"
+    item.published_at = datetime.now(timezone.utc)
+    item.attempts += 1
+    return OutboxEventResponse(
+        id=item.id,
+        aggregate_type=item.aggregate_type,
+        aggregate_id=item.aggregate_id,
+        event_type=item.event_type,
+        status=item.status,
+        attempts=item.attempts,
+        created_at=item.created_at.isoformat(),
+    )
 
 
 @router.get("/inventory")
@@ -392,61 +599,97 @@ def get_event(event_id: str, db: Session = Depends(get_db)):
     )
 
 
-@router.post("/events/{event_id}/book", response_model=EventBookingResponse)
+@router.post(
+    "/events/{event_id}/book",
+    response_model=EventBookingResponse | DeferredEventBookingResponse,
+)
 def book_event(
     event_id: str,
     request: EventBookingRequest,
     db: Session = Depends(get_db),
 ):
-    seat_stmt = (
-        select(EventSeatType)
-        .where(EventSeatType.event_id == event_id)
-        .where(EventSeatType.seat_type == request.seat_type)
-        .with_for_update()
-    )
-    seat_type = db.execute(seat_stmt).scalar_one_or_none()
-    if not seat_type:
+    try:
+        return _create_event_booking_order(db=db, event_id=event_id, request=request)
+    except Exception as exc:
+        if not _is_db_degraded(exc):
+            raise
+        db.rollback()
+        request_id = _enqueue_deferred_event_booking(event_id=event_id, request=request)
+        logger.warning(
+            "Queued event booking due to DB degradation. request_id=%s event_id=%s seat_type=%s seat_count=%s",
+            request_id,
+            event_id,
+            request.seat_type,
+            request.seat_count,
+        )
+        return DeferredEventBookingResponse(
+            request_id=request_id,
+            status="QUEUED",
+            message="Database is currently degraded. Booking request has been queued for retry.",
+        )
+
+
+@router.get(
+    "/degraded/events/bookings",
+    response_model=list[DeferredEventBookingStatusResponse],
+)
+def list_deferred_event_bookings():
+    with _deferred_queue_lock:
+        items = [dict(item) for item in _deferred_event_booking_queue]
+    return [
+        DeferredEventBookingStatusResponse(
+            request_id=item["request_id"],
+            event_id=item["event_id"],
+            seat_type=item["seat_type"],
+            seat_count=item["seat_count"],
+            status=item["status"],
+            queued_at=item["queued_at"],
+        )
+        for item in items
+    ]
+
+
+@router.post(
+    "/degraded/events/bookings/{request_id}/retry",
+    response_model=EventBookingResponse | DeferredEventBookingResponse,
+)
+def retry_deferred_event_booking(
+    request_id: str,
+    db: Session = Depends(get_db),
+):
+    queued = _get_deferred_event_booking(request_id)
+    if not queued:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Seat type not found",
-        )
-    if seat_type.available_seats < request.seat_count:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Insufficient seats available",
+            detail="Deferred booking request not found.",
         )
 
-    amount_paise = seat_type.price * request.seat_count * 100
-    seat_type.available_seats -= request.seat_count
-    booking = EventBooking(
-        event_id=event_id,
-        seat_type=request.seat_type,
-        seat_count=request.seat_count,
-        status="PENDING",
-        amount_paise=amount_paise,
-        currency="INR",
+    payload = EventBookingRequest(
+        seat_type=queued["seat_type"],
+        seat_count=queued["seat_count"],
     )
-    db.add(booking)
-    db.flush()
 
-    client = _razorpay_client()
-    order = client.order.create(
-        {
-            "amount": amount_paise,
-            "currency": "INR",
-            "receipt": booking.id,
-        }
-    )
-    booking.order_id = order.get("id")
+    try:
+        response = _create_event_booking_order(
+            db=db,
+            event_id=queued["event_id"],
+            request=payload,
+        )
+    except HTTPException:
+        _remove_deferred_event_booking(request_id)
+        raise
+    except Exception as exc:
+        if not _is_db_degraded(exc):
+            raise
+        db.rollback()
+        return DeferredEventBookingResponse(
+            request_id=request_id,
+            status="QUEUED",
+            message="Database is still degraded. Request remains queued.",
+        )
 
-    return EventBookingResponse(
-        booking_id=booking.id,
-        status=booking.status,
-        order_id=booking.order_id,
-        amount=amount_paise,
-        currency="INR",
-        key_id=_razorpay_key_id(),
-    )
+    _remove_deferred_event_booking(request_id)
+    return response
 
 
 @router.post("/events/{event_id}/waitlist", response_model=EventWaitlistJoinResponse)
@@ -571,7 +814,7 @@ def verify_event_booking(
     db: Session = Depends(get_db),
 ):
     booking = db.execute(
-        select(EventBooking).where(EventBooking.id == booking_id)
+        select(EventBooking).where(EventBooking.id == booking_id).with_for_update()
     ).scalar_one_or_none()
     if not booking:
         raise HTTPException(
@@ -582,6 +825,36 @@ def verify_event_booking(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Order not created for this booking",
+        )
+    if request.razorpay_order_id != booking.order_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Order id does not match this booking.",
+        )
+    if booking.status == "SUCCESS" and booking.payment_id == request.razorpay_payment_id:
+        return EventBookingResponse(
+            booking_id=booking.id,
+            status=booking.status,
+        )
+
+    existing_webhook = db.execute(
+        select(PaymentWebhookEvent)
+        .where(PaymentWebhookEvent.provider == "RAZORPAY")
+        .where(PaymentWebhookEvent.payment_id == request.razorpay_payment_id)
+    ).scalar_one_or_none()
+    if existing_webhook and existing_webhook.booking_id != booking.id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Payment id already linked with another booking.",
+        )
+
+    existing_paid_booking = db.execute(
+        select(EventBooking).where(EventBooking.payment_id == request.razorpay_payment_id)
+    ).scalar_one_or_none()
+    if existing_paid_booking and existing_paid_booking.id != booking.id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Payment id already consumed by another booking.",
         )
 
     client = _razorpay_client()
@@ -605,15 +878,66 @@ def verify_event_booking(
         if seat_type:
             seat_type.available_seats += booking.seat_count
             _process_waitlist(db, booking.event_id, booking.seat_type)
+        _add_outbox_event(
+            db=db,
+            aggregate_type="event_booking",
+            aggregate_id=booking.id,
+            event_type="EVENT_BOOKING_PAYMENT_FAILED",
+            payload={
+                "booking_id": booking.id,
+                "event_id": booking.event_id,
+                "seat_type": booking.seat_type,
+                "reason": "INVALID_SIGNATURE",
+                "payment_id": request.razorpay_payment_id,
+            },
+            dedupe_key=f"event_booking:{booking.id}:payment_failed:{request.razorpay_payment_id}",
+        )
         db.flush()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid payment signature",
         ) from exc
 
+    if not existing_webhook:
+        db.add(
+            PaymentWebhookEvent(
+                provider="RAZORPAY",
+                payment_id=request.razorpay_payment_id,
+                booking_type="EVENT_BOOKING",
+                booking_id=booking.id,
+                payload_hash=_hash_webhook_payload(request),
+                status="PROCESSED",
+            )
+        )
+
     booking.status = "SUCCESS"
     booking.payment_id = request.razorpay_payment_id
     booking.payment_signature = request.razorpay_signature
+    _add_outbox_event(
+        db=db,
+        aggregate_type="event_booking",
+        aggregate_id=booking.id,
+        event_type="EVENT_BOOKING_PAYMENT_CONFIRMED",
+        payload={
+            "booking_id": booking.id,
+            "event_id": booking.event_id,
+            "seat_type": booking.seat_type,
+            "seat_count": booking.seat_count,
+            "payment_id": booking.payment_id,
+            "amount_paise": booking.amount_paise,
+            "currency": booking.currency,
+        },
+        dedupe_key=f"event_booking:{booking.id}:payment_success:{request.razorpay_payment_id}",
+    )
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Duplicate webhook delivery detected for this payment.",
+        ) from exc
+
     return EventBookingResponse(
         booking_id=booking.id,
         status=booking.status,
@@ -652,6 +976,20 @@ def cancel_event_booking(
         _process_waitlist(db, booking.event_id, booking.seat_type)
 
     booking.status = "CANCELLED"
+    _add_outbox_event(
+        db=db,
+        aggregate_type="event_booking",
+        aggregate_id=booking.id,
+        event_type="EVENT_BOOKING_CANCELLED",
+        payload={
+            "booking_id": booking.id,
+            "event_id": booking.event_id,
+            "seat_type": booking.seat_type,
+            "seat_count": booking.seat_count,
+        },
+        dedupe_key=f"event_booking:{booking.id}:cancelled",
+    )
+    db.flush()
     return EventBookingResponse(
         booking_id=booking.id,
         status=booking.status,
@@ -767,7 +1105,7 @@ def verify_table_booking(
     db: Session = Depends(get_db),
 ):
     booking = db.execute(
-        select(DiningTableBooking).where(DiningTableBooking.id == booking_id)
+        select(DiningTableBooking).where(DiningTableBooking.id == booking_id).with_for_update()
     ).scalar_one_or_none()
     if not booking:
         raise HTTPException(
@@ -778,6 +1116,36 @@ def verify_table_booking(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Order not created for this booking",
+        )
+    if request.razorpay_order_id != booking.order_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Order id does not match this booking.",
+        )
+    if booking.status == "SUCCESS" and booking.payment_id == request.razorpay_payment_id:
+        return DiningTableBookingResponse(
+            booking_id=booking.id,
+            status=booking.status,
+        )
+
+    existing_webhook = db.execute(
+        select(PaymentWebhookEvent)
+        .where(PaymentWebhookEvent.provider == "RAZORPAY")
+        .where(PaymentWebhookEvent.payment_id == request.razorpay_payment_id)
+    ).scalar_one_or_none()
+    if existing_webhook and existing_webhook.booking_id != booking.id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Payment id already linked with another booking.",
+        )
+
+    existing_paid_booking = db.execute(
+        select(DiningTableBooking).where(DiningTableBooking.payment_id == request.razorpay_payment_id)
+    ).scalar_one_or_none()
+    if existing_paid_booking and existing_paid_booking.id != booking.id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Payment id already consumed by another booking.",
         )
 
     client = _razorpay_client()
@@ -796,11 +1164,36 @@ def verify_table_booking(
         ).scalar_one_or_none()
         if slot:
             slot.status = "AVAILABLE"
+        _add_outbox_event(
+            db=db,
+            aggregate_type="dining_booking",
+            aggregate_id=booking.id,
+            event_type="DINING_BOOKING_PAYMENT_FAILED",
+            payload={
+                "booking_id": booking.id,
+                "slot_id": booking.slot_id,
+                "reason": "INVALID_SIGNATURE",
+                "payment_id": request.razorpay_payment_id,
+            },
+            dedupe_key=f"dining_booking:{booking.id}:payment_failed:{request.razorpay_payment_id}",
+        )
         db.flush()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid payment signature",
         ) from exc
+
+    if not existing_webhook:
+        db.add(
+            PaymentWebhookEvent(
+                provider="RAZORPAY",
+                payment_id=request.razorpay_payment_id,
+                booking_type="DINING_BOOKING",
+                booking_id=booking.id,
+                payload_hash=_hash_webhook_payload(request),
+                status="PROCESSED",
+            )
+        )
 
     booking.status = "SUCCESS"
     booking.payment_id = request.razorpay_payment_id
@@ -810,6 +1203,29 @@ def verify_table_booking(
     ).scalar_one_or_none()
     if slot:
         slot.status = "BOOKED"
+    _add_outbox_event(
+        db=db,
+        aggregate_type="dining_booking",
+        aggregate_id=booking.id,
+        event_type="DINING_BOOKING_PAYMENT_CONFIRMED",
+        payload={
+            "booking_id": booking.id,
+            "slot_id": booking.slot_id,
+            "payment_id": booking.payment_id,
+            "amount_paise": booking.amount_paise,
+            "currency": booking.currency,
+        },
+        dedupe_key=f"dining_booking:{booking.id}:payment_success:{request.razorpay_payment_id}",
+    )
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Duplicate webhook delivery detected for this payment.",
+        ) from exc
+
     return DiningTableBookingResponse(
         booking_id=booking.id,
         status=booking.status,
