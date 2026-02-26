@@ -7,6 +7,11 @@ A FastAPI backend that models end-to-end booking and payment lifecycles for:
 
 This project is designed to demonstrate clean domain modeling, idempotent booking behavior, state transitions, and transactional inventory handling.
 
+## Live Demo
+- API Base URL: `https://<your-railway-or-render-domain>`
+- Swagger UI: `https://<your-railway-or-render-domain>/docs`
+- Health Check: `https://<your-railway-or-render-domain>/health`
+
 ## Tech Stack
 - Python
 - FastAPI
@@ -27,6 +32,27 @@ This project is designed to demonstrate clean domain modeling, idempotent bookin
 - Restaurant table slot lifecycle (`AVAILABLE -> HELD -> BOOKED`)
 - Razorpay order creation and payment signature verification
 - API + simple HTML pages for event/table/waitlist status
+
+## Project Status
+### What works
+- Event creation and seat-type inventory management
+- Event booking with Razorpay order generation
+- Payment signature verification with idempotency protection
+- Waitlist join and auto-promotion after seat release/cancellation
+- Restaurant table slot booking and payment verification
+- Outbox persistence for reliable downstream publishing
+- Graceful degradation queue for temporary DB outages
+
+### What is in progress
+- End-to-end webhook simulator and replay tooling
+- Background worker for automatic outbox publishing
+- Improved observability (structured logs and error dashboards)
+
+### Next planned features
+- Auth + role-based access (admin/operator/user)
+- Rate limiting and abuse protection on booking/payment endpoints
+- CI pipeline with lint, tests, and security scan gates
+- Public Postman collection with one-click environment setup
 
 ## Project Structure
 ```text
@@ -140,6 +166,103 @@ DB_CONNECT_RETRY_DELAY=1.5
 - `GET /outbox/events`
 - `POST /outbox/events/{event_id}/mark-published`
 
+## API Examples (Recruiter Quick Test)
+Set base URL first:
+
+```bash
+BASE_URL="http://127.0.0.1:8000"
+# For deployed app:
+# BASE_URL="https://<your-railway-or-render-domain>"
+```
+
+### 1) Health check
+Request:
+```bash
+curl -s "$BASE_URL/health"
+```
+Sample response:
+```json
+{
+  "message": "District Integrity Engine is running"
+}
+```
+
+### 2) Create an event
+Request:
+```bash
+curl -s -X POST "$BASE_URL/events" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "AI Summit 2026",
+    "type": "conference",
+    "date_time": "2026-08-20T18:00:00",
+    "location": "Bangalore",
+    "seat_types": [
+      {"seat_type": "VIP", "price": 2500, "total_seats": 50},
+      {"seat_type": "Regular", "price": 1200, "total_seats": 200}
+    ]
+  }'
+```
+Sample response:
+```json
+{
+  "id": "e9a9e2f7-3c49-4f86-a17e-2ce1f1cfa6d7",
+  "title": "AI Summit 2026",
+  "type": "conference",
+  "date_time": "2026-08-20T18:00:00",
+  "location": "Bangalore",
+  "seat_types": [
+    {"seat_type": "VIP", "price": 2500, "total_seats": 50, "available_seats": 50},
+    {"seat_type": "Regular", "price": 1200, "total_seats": 200, "available_seats": 200}
+  ]
+}
+```
+
+### 3) Book seats for an event
+Request:
+```bash
+curl -s -X POST "$BASE_URL/events/<EVENT_ID>/book" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "seat_type": "VIP",
+    "seat_count": 2
+  }'
+```
+Sample response:
+```json
+{
+  "booking_id": "0f4ff95f-77cb-4f8f-b17d-c7d42ed28040",
+  "status": "PENDING",
+  "order_id": "order_Q1x2y3z4abc",
+  "amount": 500000,
+  "currency": "INR",
+  "key_id": "rzp_test_xxxxx"
+}
+```
+
+### 4) Verify event booking payment
+Request:
+```bash
+curl -s -X POST "$BASE_URL/events/bookings/<BOOKING_ID>/verify" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "razorpay_order_id": "order_Q1x2y3z4abc",
+    "razorpay_payment_id": "pay_Q1x2y3z4abc",
+    "razorpay_signature": "generated_signature"
+  }'
+```
+Sample response:
+```json
+{
+  "booking_id": "0f4ff95f-77cb-4f8f-b17d-c7d42ed28040",
+  "status": "SUCCESS",
+  "order_id": null,
+  "amount": null,
+  "currency": null,
+  "key_id": null
+}
+```
+
 ## Reliability Design
 - Webhook Idempotency:
   Payment webhook calls are tracked in `payment_webhook_events` with unique `(provider, payment_id)`.
@@ -191,6 +314,7 @@ python -m uvicorn src.main:app --host 0.0.0.0 --port $PORT
 - `/health`
 - `/`
 - `/docs`
+7. Update the `Live Demo` section at the top of this README with your final deployed URL.
 
 ## Notes
 - `venv/` is intentionally ignored and should not be committed.
