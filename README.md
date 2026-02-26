@@ -311,9 +311,12 @@ DB_CONNECT_RETRY_DELAY=1.5
 python -m uvicorn src.main:app --host 0.0.0.0 --port $PORT
 ```
 6. Open the generated Railway domain and verify:
-- `/health`
-- `/`
-- `/docs`
+```bash
+https://payment-booking-lifecycle-engine-production.up.railway.app/
+```
+```bash
+https://payment-booking-lifecycle-engine-production.up.railway.app/docs/
+```
 7. Update the `Live Demo` section at the top of this README with your final deployed URL.
 
 ## Notes
