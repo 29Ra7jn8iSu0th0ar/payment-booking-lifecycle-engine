@@ -7,6 +7,10 @@ A FastAPI backend that models end-to-end booking and payment lifecycles for:
 
 This project is designed to demonstrate clean domain modeling, idempotent booking behavior, state transitions, and transactional inventory handling.
 
+## System Architecture
+
+![System Architecture](./scripts/architecture.png)
+
 ## Live Demo
 - API Base URL: `https://payment-booking-lifecycle-engine-production.up.railway.app/`
 - Swagger UI: `https://payment-booking-lifecycle-engine-production.up.railway.app/docs/`
