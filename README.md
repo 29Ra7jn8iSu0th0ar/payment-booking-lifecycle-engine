@@ -11,6 +11,12 @@ This project is designed to demonstrate clean domain modeling, idempotent bookin
 
 ![System Architecture](./scripts/My%20First%20Board.jpg)
 
+**Key Reliability Patterns (Agent Chaos Handling):**
+- **Transactional Outbox** → State change + event write in single DB transaction (crash-safe)
+- **Idempotency Ledger** → Webhook deduplication (no double payments)
+- **Graceful Degradation Queue** → DB outage mein bhi requests survive
+- **State Machine + Concurrency Locks** → Race conditions aur inventory overselling prevented
+
 ## Live Demo
 - API Base URL: `https://payment-booking-lifecycle-engine-production.up.railway.app/`
 - Swagger UI: `https://payment-booking-lifecycle-engine-production.up.railway.app/docs/`
