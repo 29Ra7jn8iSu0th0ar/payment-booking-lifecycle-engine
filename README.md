@@ -9,7 +9,7 @@ This project is designed to demonstrate clean domain modeling, idempotent bookin
 
 ## System Architecture
 
-![System Architecture](./scripts/architecture.png)
+![System Architecture](./scripts/My%20First%20Board.jpg)
 
 ## Live Demo
 - API Base URL: `https://payment-booking-lifecycle-engine-production.up.railway.app/`
