@@ -7,10 +7,20 @@ A FastAPI backend that models end-to-end booking and payment lifecycles for:
 
 This project is designed to demonstrate clean domain modeling, idempotent booking behavior, state transitions, and transactional inventory handling.
 
+## System Architecture
+
+![System Architecture](./scripts/My%20First%20Board.jpg)
+
+**Key Reliability Patterns (Agent Chaos Handling):**
+- **Transactional Outbox** → State change + event write in single DB transaction (crash-safe)
+- **Idempotency Ledger** → Webhook deduplication (no double payments)
+- **Graceful Degradation Queue** → DB outage mein bhi requests survive
+- **State Machine + Concurrency Locks** → Race conditions aur inventory overselling prevented
+
 ## Live Demo
-- API Base URL: `https://<your-railway-or-render-domain>`
-- Swagger UI: `https://<your-railway-or-render-domain>/docs`
-- Health Check: `https://<your-railway-or-render-domain>/health`
+- API Base URL: `https://payment-booking-lifecycle-engine-production.up.railway.app/`
+- Swagger UI: `https://payment-booking-lifecycle-engine-production.up.railway.app/docs/`
+- Health Check: `https://payment-booking-lifecycle-engine-production.up.railway.app/health/`
 
 ## Tech Stack
 - Python
@@ -311,9 +321,12 @@ DB_CONNECT_RETRY_DELAY=1.5
 python -m uvicorn src.main:app --host 0.0.0.0 --port $PORT
 ```
 6. Open the generated Railway domain and verify:
-- `/health`
-- `/`
-- `/docs`
+```bash
+https://payment-booking-lifecycle-engine-production.up.railway.app/
+```
+```bash
+https://payment-booking-lifecycle-engine-production.up.railway.app/docs/
+```
 7. Update the `Live Demo` section at the top of this README with your final deployed URL.
 
 ## Notes
@@ -326,22 +339,32 @@ Built a transaction-oriented booking engine with explicit domain state transitio
 
 
 
+#### 1. Real payment lifecycle, not mock flow  
+You implemented actual Razorpay order creation + signature verification with booking-state transitions (`PENDING -> SUCCESS/FAILED`), which is production-style thinking.
 
+#### 2. Idempotency + double-charge protection  
+`payment_id` and webhook dedupe handling prevent duplicate payment processing, which is a critical real-world backend reliability trait.
 
+#### 3. Concurrency-safe inventory handling  
+Seat deduction uses transactional/locking patterns, so overselling risk is reduced under parallel bookings.
 
+#### 4. Waitlist automation  
+When seats free up, waitlisted users are promoted with proper booking/payment continuation flow. This is strong product logic, not CRUD.
 
+#### 5. Graceful degradation strategy  
+When DB is degraded, requests can be queued/retried instead of hard-failing all users. This shows system resilience mindset.
 
+#### 6. Transactional outbox pattern  
+State changes + outbox event write together indicate event-driven architecture awareness and reliable downstream integration design.
 
+#### 7. End-to-end domain modeling  
+You modeled multiple domains (events + restaurant tables) in one engine with reusable lifecycle ideas, showing architecture maturity.
 
+#### 8. Deploy + operate capability  
+You handled real deployment, env/secrets management, debugging startup failures, and production diagnostics on Railway. Founders value “can build + ship + debug” profiles most.
 
-
-
-
-
-
-
-
-
+#### If asked in interview, one strong line:
+“I built a payment-integrated booking engine focused on correctness under retries, duplicate callbacks, and concurrent demand, then deployed and debugged it end-to-end in production.”
 
 
 1. Real payment lifecycle, not mock flow  
