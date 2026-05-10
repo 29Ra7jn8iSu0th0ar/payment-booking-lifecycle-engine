@@ -323,3 +323,50 @@ python -m uvicorn src.main:app --host 0.0.0.0 --port $PORT
 
 ## Resume-Friendly Summary
 Built a transaction-oriented booking engine with explicit domain state transitions, idempotent booking APIs, inventory locking patterns, waitlist promotion logic, and Razorpay payment verification on FastAPI + PostgreSQL.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+1. Real payment lifecycle, not mock flow  
+You implemented actual Razorpay order creation + signature verification with booking-state transitions (`PENDING -> SUCCESS/FAILED`), which is production-style thinking.
+
+2. Idempotency + double-charge protection  
+`payment_id` and webhook dedupe handling prevent duplicate payment processing, which is a critical real-world backend reliability trait.
+
+3. Concurrency-safe inventory handling  
+Seat deduction uses transactional/locking patterns, so overselling risk is reduced under parallel bookings.
+
+4. Waitlist automation  
+When seats free up, waitlisted users are promoted with proper booking/payment continuation flow. This is strong product logic, not CRUD.
+
+5. Graceful degradation strategy  
+When DB is degraded, requests can be queued/retried instead of hard-failing all users. This shows system resilience mindset.
+
+6. Transactional outbox pattern  
+State changes + outbox event write together indicate event-driven architecture awareness and reliable downstream integration design.
+
+7. End-to-end domain modeling  
+You modeled multiple domains (events + restaurant tables) in one engine with reusable lifecycle ideas, showing architecture maturity.
+
+8. Deploy + operate capability  
+You handled real deployment, env/secrets management, debugging startup failures, and production diagnostics on Railway. Founders value “can build + ship + debug” profiles most.
+
+If asked in interview, one strong line:
+“I built a payment-integrated booking engine focused on correctness under retries, duplicate callbacks, and concurrent demand, then deployed and debugged it end-to-end in production.”

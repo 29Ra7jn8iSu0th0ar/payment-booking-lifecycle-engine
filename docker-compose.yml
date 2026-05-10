@@ -10,4 +10,5 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: district_engine
     ports:
-      - "5432:5432"
+      # - "5432:5432"
+      - "1234:5432"

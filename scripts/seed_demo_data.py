@@ -1,6 +1,13 @@
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+import sys
 
 from sqlalchemy import delete, select
+
+# Allow running as: python scripts/seed_demo_data.py
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 from src.infrastructure.db.models import DiningTableSlot, Event, EventSeatType
 from src.infrastructure.db.session import SessionLocal
@@ -33,6 +40,66 @@ def seed_events(db) -> None:
             "seat_types": [
                 {"seat_type": "General", "price": 1200, "total_seats": 700},
                 {"seat_type": "Premium", "price": 2800, "total_seats": 180},
+            ],
+        },
+        {
+            "title": "Delhi Tech Conference 2026",
+            "type": "CONFERENCE",
+            "date_time": _dt(days_from_now=20, hour=10, minute=0),
+            "location": "Pragati Maidan, New Delhi",
+            "seat_types": [
+                {"seat_type": "Standard", "price": 2200, "total_seats": 450},
+                {"seat_type": "Executive", "price": 3800, "total_seats": 140},
+            ],
+        },
+        {
+            "title": "India vs Australia T20",
+            "type": "SPORTS",
+            "date_time": _dt(days_from_now=8, hour=19, minute=0),
+            "location": "Arun Jaitley Stadium, Delhi",
+            "seat_types": [
+                {"seat_type": "North Stand", "price": 1500, "total_seats": 600},
+                {"seat_type": "Pavilion", "price": 4200, "total_seats": 160},
+            ],
+        },
+        {
+            "title": "Stand-up Night: Zakir Special",
+            "type": "COMEDY",
+            "date_time": _dt(days_from_now=12, hour=20, minute=0),
+            "location": "Siri Fort Auditorium, Delhi",
+            "seat_types": [
+                {"seat_type": "Silver", "price": 999, "total_seats": 320},
+                {"seat_type": "Gold", "price": 1999, "total_seats": 90},
+            ],
+        },
+        {
+            "title": "Startup Pitch Expo",
+            "type": "EXPO",
+            "date_time": _dt(days_from_now=25, hour=11, minute=30),
+            "location": "Yashobhoomi, Dwarka",
+            "seat_types": [
+                {"seat_type": "Visitor", "price": 800, "total_seats": 700},
+                {"seat_type": "Investor Pass", "price": 5000, "total_seats": 80},
+            ],
+        },
+        {
+            "title": "Classical Evening with Symphony",
+            "type": "MUSIC",
+            "date_time": _dt(days_from_now=18, hour=18, minute=45),
+            "location": "Kamani Auditorium, Delhi",
+            "seat_types": [
+                {"seat_type": "Balcony", "price": 1600, "total_seats": 260},
+                {"seat_type": "Orchestra", "price": 3200, "total_seats": 110},
+            ],
+        },
+        {
+            "title": "Food & Culture Carnival",
+            "type": "FESTIVAL",
+            "date_time": _dt(days_from_now=30, hour=17, minute=0),
+            "location": "Major Dhyan Chand National Stadium",
+            "seat_types": [
+                {"seat_type": "General", "price": 700, "total_seats": 900},
+                {"seat_type": "Family Lounge", "price": 2600, "total_seats": 130},
             ],
         },
     ]
@@ -92,6 +159,41 @@ def seed_dining(db) -> None:
             "price_per_table": 4200,
             "date_time": _dt(days_from_now=3, hour=20, minute=15),
         },
+        {
+            "restaurant_name": "Skyline Rooftop",
+            "table_number": "R1",
+            "capacity": 2,
+            "price_per_table": 1800,
+            "date_time": _dt(days_from_now=2, hour=19, minute=30),
+        },
+        {
+            "restaurant_name": "Skyline Rooftop",
+            "table_number": "R4",
+            "capacity": 4,
+            "price_per_table": 3200,
+            "date_time": _dt(days_from_now=4, hour=21, minute=0),
+        },
+        {
+            "restaurant_name": "Spice Court",
+            "table_number": "S2",
+            "capacity": 2,
+            "price_per_table": 1400,
+            "date_time": _dt(days_from_now=1, hour=20, minute=15),
+        },
+        {
+            "restaurant_name": "Spice Court",
+            "table_number": "S7",
+            "capacity": 6,
+            "price_per_table": 3900,
+            "date_time": _dt(days_from_now=5, hour=20, minute=45),
+        },
+        {
+            "restaurant_name": "Ocean Pearl",
+            "table_number": "O3",
+            "capacity": 4,
+            "price_per_table": 2600,
+            "date_time": _dt(days_from_now=3, hour=19, minute=45),
+        },
     ]
 
     for slot in slots:
@@ -125,7 +227,7 @@ def main() -> None:
         seed_events(db)
         seed_dining(db)
         db.commit()
-        print("Seed complete: Sunidhi concert, Holi festival, Hotel Star dining slots added.")
+        print("Seed complete: demo events and dining slots upserted.")
     except Exception:
         db.rollback()
         raise

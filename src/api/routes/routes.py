@@ -6,12 +6,13 @@ import logging
 import os
 import threading
 from uuid import uuid4
+# from uuid import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
-from sqlalchemy import select
+from sqlalchemy import select, delete
 from sqlalchemy.exc import IntegrityError, OperationalError, TimeoutError as SQLAlchemyTimeoutError
 import razorpay
 
@@ -187,6 +188,36 @@ def _inventory_stats(inventory: SeatInventory) -> dict:
         "available_seats": inventory.available_seats,
         "booked_seats": booked_seats,
     }
+
+
+def _delete_event_with_dependencies(db: Session, event_id: str) -> bool:
+    event = db.execute(select(Event).where(Event.id == event_id)).scalar_one_or_none()
+    if not event:
+        return False
+
+    booking_ids = list(
+        db.execute(
+            select(EventBooking.id).where(EventBooking.event_id == event_id)
+        ).scalars().all()
+    )
+
+    if booking_ids:
+        db.execute(
+            delete(PaymentWebhookEvent)
+            .where(PaymentWebhookEvent.booking_type == "EVENT_BOOKING")
+            .where(PaymentWebhookEvent.booking_id.in_(booking_ids))
+        )
+        db.execute(
+            delete(OutboxEvent)
+            .where(OutboxEvent.aggregate_type == "event_booking")
+            .where(OutboxEvent.aggregate_id.in_(booking_ids))
+        )
+
+    db.execute(delete(EventWaitlistEntry).where(EventWaitlistEntry.event_id == event_id))
+    db.execute(delete(EventBooking).where(EventBooking.event_id == event_id))
+    db.execute(delete(EventSeatType).where(EventSeatType.event_id == event_id))
+    db.execute(delete(Event).where(Event.id == event_id))
+    return True
 
 
 def _waitlist_position(db: Session, entry: EventWaitlistEntry) -> int:
@@ -530,6 +561,34 @@ def create_event(request: EventCreate, db: Session = Depends(get_db)):
             detail="Invalid date_time format. Use ISO format.",
         ) from exc
 
+    existing_event = db.execute(
+        select(Event)
+        .where(Event.title == request.title)
+        .where(Event.type == request.type)
+        .where(Event.date_time == event_time)
+        .where(Event.location == request.location)
+    ).scalar_one_or_none()
+
+    if existing_event:
+        seat_stmt = select(EventSeatType).where(EventSeatType.event_id == existing_event.id)
+        existing_seat_types = list(db.execute(seat_stmt).scalars().all())
+        return EventResponse(
+            id=existing_event.id,
+            title=existing_event.title,
+            type=existing_event.type,
+            date_time=existing_event.date_time.isoformat(),
+            location=existing_event.location,
+            seat_types=[
+                EventSeatTypeResponse(
+                    seat_type=seat.seat_type,
+                    price=seat.price,
+                    total_seats=seat.total_seats,
+                    available_seats=seat.available_seats,
+                )
+                for seat in existing_seat_types
+            ],
+        )
+
     event = Event(
         title=request.title,
         type=request.type,
@@ -597,6 +656,43 @@ def get_event(event_id: str, db: Session = Depends(get_db)):
             for seat in seat_types
         ],
     )
+
+
+@router.delete("/events/{event_id}")
+def delete_event(event_id: str, db: Session = Depends(get_db)):
+    deleted = _delete_event_with_dependencies(db=db, event_id=event_id)
+    if not deleted:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Event not found",
+        )
+    return {"message": "Event deleted", "event_id": event_id}
+
+
+@router.post("/events/dedupe")
+def dedupe_events(db: Session = Depends(get_db)):
+    events = list(db.execute(select(Event).order_by(Event.created_at)).scalars().all())
+    keep_keys: set[tuple[str, str, str, str]] = set()
+    removed_event_ids: list[str] = []
+
+    for event in events:
+        key = (
+            event.title.strip().lower(),
+            event.type.strip().lower(),
+            event.date_time.isoformat(),
+            event.location.strip().lower(),
+        )
+        if key in keep_keys:
+            _delete_event_with_dependencies(db=db, event_id=event.id)
+            removed_event_ids.append(event.id)
+            continue
+        keep_keys.add(key)
+
+    return {
+        "message": "Duplicate cleanup complete",
+        "removed_count": len(removed_event_ids),
+        "removed_event_ids": removed_event_ids,
+    }
 
 
 @router.post(
